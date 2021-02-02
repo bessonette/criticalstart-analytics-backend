@@ -480,6 +480,8 @@ switch ($metric) {
 						`SQL Date` as sql_date,
 						`Owner ID` as owner_id
 					FROM lead
+					WHERE
+						`Converted` = 0
 					UNION
 					SELECT
 						'Contact' as type,
@@ -497,8 +499,6 @@ switch ($metric) {
 						`SQL Date` as sql_date,
 						`Owner ID` as owner_id
 					FROM contact
-					WHERE
-						`Converted Lead ID` IS NULL
 				) as rollup
 				INNER JOIN user ON rollup.owner_id = user.`User ID`
 				WHERE
@@ -577,6 +577,8 @@ switch ($metric) {
 								`Referrer Code` as referrer_code,
 								`Owner ID` as owner_id
 							FROM lead
+							WHERE
+								`Converted` = 0
 							UNION
 							SELECT
 								'Contact' as type,
@@ -593,8 +595,6 @@ switch ($metric) {
 								`Referrer Code` as referrer_code,
 								`Owner ID` as owner_id
 							FROM contact
-							WHERE
-								`Converted Lead ID` IS NULL
 						) as rollup
 						LEFT JOIN opportunity_contact_role opp_role ON rollup.contact_id = opp_role.`Contact ID`
 						LEFT JOIN opportunity opp ON opp.`Opportunity ID` = opp_role.`Opportunity ID` AND opp.`From Internal Account` = 0
@@ -609,6 +609,117 @@ switch ($metric) {
 				$stmt->execute(array(':start' => $_GET['start'], ':end' => $_GET['end']));
 				$results = $stmt->fetchAll();
 
+				if (isset($_GET['marketingInfluenced']) && $_GET['marketingInfluenced'] == 'true') {
+					$stmt = $pdo->prepare("
+								SELECT
+									first_name,
+									last_name,
+									lead_id,
+									company,
+									rollup.Email as email,
+									state,
+									user.`First Name` as rep_first_name,
+									user.`Last Name` as rep_last_name,
+									opp.amount as amount,
+									opp.`Opportunity ID` as opp_id,
+									opp.Department as opp_dept
+								FROM (
+										SELECT
+											'Lead' as type,
+											lead.`First Name` as first_name,
+											lead.`Last Name` as last_name,
+											lead.`Lead ID` as lead_id,
+											lead.Company as company,
+											lead.Email as email,
+											lead.`State/Province Code` as state,
+											lead.`Converted Contact ID` as contact_id,
+											lead.`Converted Account ID` as account_id,
+											`Created Date` as created_date,
+											`Lead Source` as lead_source,
+											`Referrer Code` as referrer_code,
+											`Owner ID` as owner_id
+										FROM lead
+										WHERE
+											`Converted` = 0
+										UNION
+										SELECT
+											'Contact' as type,
+											contact.`First Name` as first_name,
+											contact.`Last Name` as last_name,
+											contact.`Contact ID` as lead_id,
+											contact.`Account Name` as company,
+											contact.Email as email,
+											contact.`Mailing State/Province Code` as state,
+											contact.`Contact ID` as contact_id,
+											contact.`Account ID` as account_id,
+											`Created Date` as created_date,
+											`Lead Source` as lead_source,
+											`Referrer Code` as referrer_code,
+											`Owner ID` as owner_id
+										FROM contact
+									) as rollup
+									LEFT JOIN opportunity opp ON opp.`Account ID` = account_id AND opp.`From Internal Account` = 0
+										AND opp.`Opportunity Type` IN ('New Business', 'Opportunity')
+									LEFT JOIN user ON rollup.owner_id = user.`User ID`
+								WHERE
+									created_date >= :start AND created_date <= :end
+									$dynamicMetricWhere
+									$dynamicBreakdownWhere
+									$dynamicRepQuery
+									AND opp.`Created Date` > created_date
+									AND opp.`Opportunity ID` NOT IN (
+										SELECT
+											opp.`Opportunity ID`
+										FROM (
+												SELECT
+													lead.`Converted Contact ID` as contact_id,
+													lead.`Converted Account ID` as account_id,
+													`Created Date` as created_date,
+													`Lead Source` as lead_source,
+													`Referrer Code` as referrer_code,
+													`Owner ID` as owner_id
+												FROM lead
+												WHERE
+													`Converted` = 0
+												UNION
+												SELECT
+													contact.`Contact ID` as contact_id,
+													contact.`Account ID` as account_id,
+													`Created Date` as created_date,
+													`Lead Source` as lead_source,
+													`Referrer Code` as referrer_code,
+													`Owner ID` as owner_id
+												FROM contact
+											) as rollup
+											LEFT JOIN opportunity_contact_role opp_role ON rollup.contact_id = opp_role.`Contact ID`
+											LEFT JOIN opportunity opp ON opp.`Opportunity ID` = opp_role.`Opportunity ID` AND opp.`From Internal Account` = 0
+												AND opp.`Opportunity Type` IN ('New Business', 'Opportunity')
+											LEFT JOIN user ON rollup.owner_id = user.`User ID`
+										WHERE
+											created_date >= :start2 AND created_date <= :end2
+											$dynamicMetricWhere
+											$dynamicBreakdownWhere
+											$dynamicRepQuery
+											AND opp.`Opportunity ID` IS NOT NULL
+											ORDER BY rollup.created_date ASC
+									)
+								ORDER BY opp.`Opportunity ID`, lead_source, referrer_code, user.`User ID`
+						");
+						$stmt->execute(array(':start' => $_GET['start'], ':end' => $_GET['end'], ':start2' => $_GET['start'], ':end2' => $_GET['end']));
+						$results2 = $stmt->fetchAll();
+
+						$results = array_merge($results, $results2);
+				}
+
+/*
+								`Referrer Code` as referrer_code,
+								`Owner ID` as owner_id
+							FROM contact
+							WHERE
+								`Converted Lead ID` IS NULL
+						) as rollup
+						LEFT JOIN opportunity_contact_role opp_role ON rollup.contact_id = opp_role.`Contact ID`
+ */
 
 				echo json_encode($results);
 
@@ -696,13 +807,20 @@ switch ($metric) {
 			$breakdownSelect = '';
 			$breakdownGroupBy = '';
 			$breakdownOrderBy = '';
+			$breakdownSelectNested = $breakdownSelect;
+			$breakdownGroupByNested = $breakdownGroupBy;
+			$breakdownOrderByNested = $breakdownOrderBy;
 
 			if (isset($_GET['breakdown'])) {
 				switch ($_GET['breakdown']) {
 					case 'leadsource':
 						$breakdownSelect = ', CASE WHEN lead_source IS NULL then \'PENDING\' else lead_source END AS lead_source';
+						$breakdownSelectNested = $breakdownSelect;
 						$breakdownGroupBy = 'GROUP BY lead_source';
 						$breakdownOrderBy = 'ORDER BY lead_source';
+						$breakdownSelectNested = $breakdownSelect;
+						$breakdownGroupByNested = $breakdownGroupBy;
+						$breakdownOrderByNested = $breakdownOrderBy;
 						break;
 
 					case 'leadsource-w-referrer':
@@ -710,12 +828,18 @@ switch ($metric) {
 											, CASE WHEN referrer_code IS NULL then \'PENDING\' else referrer_code END AS referrer_code';
 						$breakdownGroupBy = 'GROUP BY lead_source, referrer_code';
 						$breakdownOrderBy = 'ORDER BY lead_source, referrer_code';
+						$breakdownSelectNested = $breakdownSelect;
+						$breakdownGroupByNested = $breakdownGroupBy;
+						$breakdownOrderByNested = $breakdownOrderBy;
 						break;
 
 					case 'rep':
 						$breakdownSelect = ', CONCAT(user.`First Name`, " ",user.`Last Name`) as rep_name, user.`User ID` as rep_id';
+						$breakdownSelectNested = ', CONCAT(first_name, " ",last_name) as rep_name, rep_id';
 						$breakdownGroupBy = 'GROUP BY CONCAT(user.`First Name`, " ",user.`Last Name`), user.`User ID`';
+						$breakdownGroupByNested = 'GROUP BY CONCAT(first_name, " ",last_name), rep_id';
 						$breakdownOrderBy = 'ORDER BY CONCAT(user.`First Name`, " ",user.`Last Name`), user.`User ID`';
+						$breakdownOrderByNested = 'ORDER BY CONCAT(first_name, " ",last_name), rep_id';
 						break;
 				}
 			}
@@ -752,6 +876,8 @@ switch ($metric) {
 						`SQL Date` as sql_date,
 						`Owner ID` as owner_id
 					FROM lead
+					WHERE
+						`Converted` = 0
 					UNION
 					SELECT
 						'Contact' as type,
@@ -764,8 +890,6 @@ switch ($metric) {
 						`SQL Date` as sql_date,
 						`Owner ID` as owner_id
 					FROM contact
-					WHERE
-						`Converted Lead ID` IS NULL
 				) as rollup
 				INNER JOIN user ON rollup.owner_id = user.`User ID`
 				WHERE
@@ -793,6 +917,7 @@ switch ($metric) {
 			$tofuResults = $stmt->fetchAll();
 
 
+			//print_r("
 			$stmt = $pdo->prepare("
 				SELECT
 					COUNT(*) as leads_bofu,
@@ -802,7 +927,7 @@ switch ($metric) {
 					SUM(case when `Stage` IN ('Closed Won') then Amount else 0 end) AS closed_value,
 					SUM(case when `Stage` IN ('Closed Lost') then 1 else 0 end) AS closed_lost,
 					SUM(case when `Stage` IN ('Closed Lost') then Amount else 0 end) AS closed_lost_value
-					$breakdownSelect
+					$breakdownSelectNested
 				FROM
 					(
 						SELECT
@@ -811,7 +936,9 @@ switch ($metric) {
 							MAX(Amount) as Amount,
 							lead_source,
 							referrer_code,
-							user.`User ID`
+							user.`User ID` as rep_id,
+							user.`First Name` as first_name,
+							user.`Last Name` as last_name
 						FROM (
 								SELECT
 									lead.`Converted Contact ID` as contact_id,
@@ -821,6 +948,8 @@ switch ($metric) {
 									`Referrer Code` as referrer_code,
 									`Owner ID` as owner_id
 								FROM lead
+								WHERE
+									`Converted` = 0
 								UNION
 								SELECT
 									contact.`Contact ID` as contact_id,
@@ -830,8 +959,6 @@ switch ($metric) {
 									`Referrer Code` as referrer_code,
 									`Owner ID` as owner_id
 								FROM contact
-								WHERE
-									`Converted Lead ID` IS NULL
 							) as rollup
 							LEFT JOIN opportunity_contact_role opp_role ON rollup.contact_id = opp_role.`Contact ID`
 							LEFT JOIN opportunity opp ON opp.`Opportunity ID` = opp_role.`Opportunity ID` AND opp.`From Internal Account` = 0
@@ -841,12 +968,12 @@ switch ($metric) {
 						 	$leadSourceWhere
 							AND created_date >= :start AND created_date <= :end" . $eventsSQLLeadTable . "
 							AND opp.`Opportunity ID` IS NOT NULL
-						GROUP BY opp.`Opportunity ID`, lead_source, referrer_code, user.`User ID`
-						ORDER BY opp.`Opportunity ID`, lead_source, referrer_code, user.`User ID`
+						GROUP BY opp.`Opportunity ID`, lead_source, referrer_code, user.`User ID`, user.`First Name`, user.`Last Name`
+						ORDER BY opp.`Opportunity ID`, lead_source, referrer_code, user.`User ID`, user.`First Name`, user.`Last Name`
 
 					) as opps
-				$breakdownGroupBy
-				$breakdownOrderBy
+				$breakdownGroupByNested
+				$breakdownOrderByNested
 				");
 			$stmt->execute(array(':start' => $start . ' 00:00:00', ':end' => $end . ' 23:59:59'));
 			$bofuResults = $stmt->fetchAll();
@@ -883,6 +1010,8 @@ switch ($metric) {
 										`Referrer Code` as referrer_code,
 										`Owner ID` as owner_id
 									FROM lead
+									WHERE
+										`Converted` = 0
 									UNION
 									SELECT
 										contact.`Contact ID` as contact_id,
@@ -892,8 +1021,6 @@ switch ($metric) {
 										`Referrer Code` as referrer_code,
 										`Owner ID` as owner_id
 									FROM contact
-									WHERE
-										`Converted Lead ID` IS NULL
 								) as rollup
 								LEFT JOIN opportunity opp ON opp.`Account ID` = account_id AND opp.`From Internal Account` = 0
 									AND opp.`Opportunity Type` IN ('New Business', 'Opportunity')
@@ -915,6 +1042,8 @@ switch ($metric) {
 												`Referrer Code` as referrer_code,
 												`Owner ID` as owner_id
 											FROM lead
+											WHERE
+												`Converted` = 0
 											UNION
 											SELECT
 												contact.`Contact ID` as contact_id,
@@ -924,8 +1053,6 @@ switch ($metric) {
 												`Referrer Code` as referrer_code,
 												`Owner ID` as owner_id
 											FROM contact
-											WHERE
-												`Converted Lead ID` IS NULL
 										) as rollup
 										LEFT JOIN opportunity_contact_role opp_role ON rollup.contact_id = opp_role.`Contact ID`
 										LEFT JOIN opportunity opp ON opp.`Opportunity ID` = opp_role.`Opportunity ID` AND opp.`From Internal Account` = 0
@@ -1079,9 +1206,16 @@ switch ($metric) {
 							break;
 
 						case 'rep':
-							$breakdownSelect = ', CONCAT(user.`First Name`, " ",user.`Last Name`) as rep_name, user.`User ID` as rep_id';
-							$breakdownGroupBy = 'GROUP BY CONCAT(user.`First Name`, " ",user.`Last Name`), user.`User ID`';
-							$breakdownOrderBy = 'ORDER BY CONCAT(user.`First Name`, " ",user.`Last Name`), user.`User ID`';
+							foreach ($bofuResults as $bofuKey => $bofuResult) {
+								if ($bofuResult['rep_name'] == $tofuResults[$key]['rep_name']) {
+									$tofuResults[$key]['pipeline'] = $bofuResult['pipeline'];
+									$tofuResults[$key]['pipeline_value'] = $bofuResult['pipeline_value'];
+									$tofuResults[$key]['closed'] = $bofuResult['closed'];
+									$tofuResults[$key]['closed_value'] = $bofuResult['closed_value'];
+									$tofuResults[$key]['closed_lost'] = $bofuResult['closed_lost'];
+									$tofuResults[$key]['closed_lost_value'] = $bofuResult['closed_lost_value'];
+								}
+							}
 							break;
 
 						default:
